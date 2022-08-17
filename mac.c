@@ -5409,9 +5409,12 @@ static void ath11k_mac_tx_mgmt_free(struct ath11k *ar, int buf_id)
 	if (!msdu)
 		return;
 
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(ATH11K_SKB_CB(msdu)->paddr);
+#else
 	dma_unmap_single(ar->ab->dev, ATH11K_SKB_CB(msdu)->paddr, msdu->len,
 			 DMA_TO_DEVICE);
-
+#endif
 	info = IEEE80211_SKB_CB(msdu);
 	memset(&info->status, 0, sizeof(info->status));
 
@@ -5471,9 +5474,13 @@ static int ath11k_mac_mgmt_tx_wmi(struct ath11k *ar, struct ath11k_vif *arvif,
 			skb_put(skb, IEEE80211_CCMP_MIC_LEN);
 		}
 	}
-
+#ifdef RISCV_UNMATCHED
+	paddr = ath11k_dma_chan_map_addr((unsigned long)skb->data, skb->len);
+	if(unlikely(paddr == 0)) {
+#else
 	paddr = dma_map_single(ab->dev, skb->data, skb->len, DMA_TO_DEVICE);
 	if (dma_mapping_error(ab->dev, paddr)) {
+#endif	
 		ath11k_warn(ab, "failed to DMA map mgmt Tx buffer\n");
 		ret = -EIO;
 		goto err_free_idr;
@@ -5490,8 +5497,12 @@ static int ath11k_mac_mgmt_tx_wmi(struct ath11k *ar, struct ath11k_vif *arvif,
 	return 0;
 
 err_unmap_buf:
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(ATH11K_SKB_CB(skb)->paddr);
+#else
 	dma_unmap_single(ab->dev, ATH11K_SKB_CB(skb)->paddr,
 			 skb->len, DMA_TO_DEVICE);
+#endif
 err_free_idr:
 	spin_lock_bh(&ar->txmgmt_idr_lock);
 	idr_remove(&ar->txmgmt_idr, buf_id);

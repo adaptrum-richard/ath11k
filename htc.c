@@ -112,9 +112,16 @@ int ath11k_htc_send(struct ath11k_htc *htc,
 	ath11k_htc_prepare_tx_skb(ep, skb);
 
 	skb_cb->eid = eid;
+#ifdef RISCV_UNMATCHED
+	skb_cb->paddr = ath11k_dma_chan_map_addr((unsigned long)skb->data, skb->len);
+	if(unlikely(skb_cb->paddr == 0)) {
+		printk("%s %d\n", __func__, __LINE__);
+		//printk("skb_cb->paddr = 0x%lx\n", skb_cb->paddr);
+#else
 	skb_cb->paddr = dma_map_single(dev, skb->data, skb->len, DMA_TO_DEVICE);
 	ret = dma_mapping_error(dev, skb_cb->paddr);
 	if (ret) {
+#endif
 		ret = -EIO;
 		goto err_credits;
 	}
@@ -126,7 +133,11 @@ int ath11k_htc_send(struct ath11k_htc *htc,
 	return 0;
 
 err_unmap:
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(skb_cb->paddr);
+#else
 	dma_unmap_single(dev, skb_cb->paddr, skb->len, DMA_TO_DEVICE);
+#endif
 err_credits:
 	if (credit_flow_enabled) {
 		spin_lock_bh(&htc->tx_lock);

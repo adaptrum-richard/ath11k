@@ -506,10 +506,12 @@ static void ath11k_ce_tx_process_cb(struct ath11k_ce_pipe *pipe)
 	while (!IS_ERR(skb = ath11k_ce_completed_send_next(pipe))) {
 		if (!skb)
 			continue;
-
+#ifdef RISCV_UNMATCHED
+		ath11k_dma_chan_unmap_addr(ATH11K_SKB_CB(skb)->paddr);
+#else
 		dma_unmap_single(ab->dev, ATH11K_SKB_CB(skb)->paddr, skb->len,
 				 DMA_TO_DEVICE);
-
+#endif
 		if ((!pipe->send_cb) || ab->hw_params.credit_flow) {
 			dev_kfree_skb_any(skb);
 			continue;

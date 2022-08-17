@@ -11,7 +11,7 @@
 #include "peer.h"
 #include "mac.h"
 
-static enum hal_tcl_encap_type
+static inline enum hal_tcl_encap_type
 ath11k_dp_tx_get_encap_type(struct ath11k_vif *arvif, struct sk_buff *skb)
 {
 	struct ieee80211_tx_info *tx_info = IEEE80211_SKB_CB(skb);
@@ -26,7 +26,7 @@ ath11k_dp_tx_get_encap_type(struct ath11k_vif *arvif, struct sk_buff *skb)
 	return HAL_TCL_ENCAP_TYPE_NATIVE_WIFI;
 }
 
-static void ath11k_dp_tx_encap_nwifi(struct sk_buff *skb)
+static inline void ath11k_dp_tx_encap_nwifi(struct sk_buff *skb)
 {
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	u8 *qos_ctl;
@@ -43,7 +43,7 @@ static void ath11k_dp_tx_encap_nwifi(struct sk_buff *skb)
 	hdr->frame_control &= ~__cpu_to_le16(IEEE80211_STYPE_QOS_DATA);
 }
 
-static u8 ath11k_dp_tx_get_tid(struct sk_buff *skb)
+static inline u8 ath11k_dp_tx_get_tid(struct sk_buff *skb)
 {
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	struct ath11k_skb_cb *cb = ATH11K_SKB_CB(skb);
@@ -145,7 +145,7 @@ tcl_ring_sel:
 	ti.encap_type = ath11k_dp_tx_get_encap_type(arvif, skb);
 
 	if (ieee80211_has_a4(hdr->frame_control) &&
-	    is_multicast_ether_addr(hdr->addr3) && arsta &&
+	    unlikely(is_multicast_ether_addr(hdr->addr3)) && arsta &&
 	    arsta->use_4addr_set) {
 		ti.meta_data_flags = arsta->tcl_metadata;
 		ti.flags0 |= FIELD_PREP(HAL_TCL_DATA_CMD_INFO1_TO_FW, 1);
@@ -183,7 +183,7 @@ tcl_ring_sel:
 			     FIELD_PREP(HAL_TCL_DATA_CMD_INFO1_TCP6_CKSUM_EN, 1);
 	}
 
-	if (ieee80211_vif_is_mesh(arvif->vif))
+	if (unlikely(ieee80211_vif_is_mesh(arvif->vif)))
 		ti.enable_mesh = true;
 
 	ti.flags1 |= FIELD_PREP(HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE, 1);
@@ -210,9 +210,13 @@ tcl_ring_sel:
 		atomic_inc(&ab->soc_stats.tx_err.misc_fail);
 		goto fail_remove_idr;
 	}
-
+#ifdef RISCV_UNMATCHED
+	ti.paddr = ath11k_dma_chan_map_addr((unsigned long)skb->data, skb->len);
+	if(unlikely(ti.paddr == 0)) {
+#else
 	ti.paddr = dma_map_single(ab->dev, skb->data, skb->len, DMA_TO_DEVICE);
 	if (unlikely(dma_mapping_error(ab->dev, ti.paddr))) {
+#endif
 		atomic_inc(&ab->soc_stats.tx_err.misc_fail);
 		ath11k_warn(ab, "failed to DMA map data Tx buffer\n");
 		ret = -ENOMEM;
@@ -272,8 +276,11 @@ tcl_ring_sel:
 	return 0;
 
 fail_unmap_dma:
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(ti.paddr);
+#else
 	dma_unmap_single(ab->dev, ti.paddr, ti.data_len, DMA_TO_DEVICE);
-
+#endif
 fail_remove_idr:
 	spin_lock_bh(&tx_ring->tx_idr_lock);
 	idr_remove(&tx_ring->txbuf_idr,
@@ -305,8 +312,11 @@ static void ath11k_dp_tx_free_txbuf(struct ath11k_base *ab, u8 mac_id,
 	}
 
 	skb_cb = ATH11K_SKB_CB(msdu);
-
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(skb_cb->paddr);
+#else
 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
+#endif
 	dev_kfree_skb_any(msdu);
 
 	ar = ab->pdevs[mac_id].ar;
@@ -342,7 +352,11 @@ ath11k_dp_tx_htt_tx_complete_buf(struct ath11k_base *ab,
 	if (atomic_dec_and_test(&ar->dp.num_tx_pending))
 		wake_up(&ar->dp.tx_empty_waitq);
 
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(skb_cb->paddr);
+#else
 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
+#endif
 
 	memset(&info->status, 0, sizeof(info->status));
 
@@ -528,9 +542,11 @@ static void ath11k_dp_tx_complete_msdu(struct ath11k *ar,
 	}
 
 	skb_cb = ATH11K_SKB_CB(msdu);
-
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(skb_cb->paddr);
+#else
 	dma_unmap_single(ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
-
+#endif
 	if (unlikely(!rcu_access_pointer(ab->pdevs_active[ar->pdev_idx]))) {
 		dev_kfree_skb_any(msdu);
 		return;
@@ -827,8 +843,10 @@ int ath11k_dp_tx_htt_srng_setup(struct ath11k_base *ab, u32 ring_id,
 	int ret;
 
 	skb = ath11k_htc_alloc_skb(ab, len);
-	if (!skb)
+	if (!skb){
+		printk("%s %d error\n", __func__, __LINE__);
 		return -ENOMEM;
+	}
 
 	memset(&params, 0, sizeof(params));
 	ath11k_hal_srng_get_params(ab, srng, &params);
@@ -839,9 +857,10 @@ int ath11k_dp_tx_htt_srng_setup(struct ath11k_base *ab, u32 ring_id,
 	ret = ath11k_dp_tx_get_ring_id_type(ab, mac_id, ring_id,
 					    ring_type, &htt_ring_type,
 					    &htt_ring_id);
-	if (ret)
+	if (ret){
+		printk("%s %d error\n", __func__, __LINE__);
 		goto err_free;
-
+	}
 	skb_put(skb, len);
 	cmd = (struct htt_srng_setup_cmd *)skb->data;
 	cmd->info0 = FIELD_PREP(HTT_SRNG_SETUP_CMD_INFO0_MSG_TYPE,
@@ -864,9 +883,10 @@ int ath11k_dp_tx_htt_srng_setup(struct ath11k_base *ab, u32 ring_id,
 				 HAL_ADDR_MSB_REG_SHIFT;
 
 	ret = ath11k_hal_srng_get_entrysize(ab, ring_type);
-	if (ret < 0)
+	if (ret < 0){
+		printk("%s %d error\n", __func__, __LINE__);
 		goto err_free;
-
+	}
 	ring_entry_sz = ret;
 
 	ring_entry_sz >>= 2;
@@ -921,9 +941,10 @@ int ath11k_dp_tx_htt_srng_setup(struct ath11k_base *ab, u32 ring_id,
 		   ring_id, ring_type, cmd->intr_info, cmd->info2);
 
 	ret = ath11k_htc_send(&ab->htc, ab->dp.eid, skb);
-	if (ret)
+	if (ret){
+		printk("%s %d error\n", __func__, __LINE__);
 		goto err_free;
-
+	}
 	return 0;
 
 err_free:

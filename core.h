@@ -1053,5 +1053,7 @@ static inline const char *ath11k_bus_str(enum ath11k_bus bus)
 
 	return "unknown";
 }
-
+#define RISCV_UNMATCHED
+void ath11k_dma_chan_unmap_addr(unsigned long dst);
+unsigned int ath11k_dma_chan_map_addr(unsigned long src, int len);
 #endif /* _CORE_H_ */

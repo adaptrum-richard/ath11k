@@ -1006,9 +1006,12 @@ static int ath11k_dp_tx_pending_cleanup(int buf_id, void *skb, void *ctx)
 	struct ath11k_base *ab = (struct ath11k_base *)ctx;
 	struct sk_buff *msdu = skb;
 
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(ATH11K_SKB_CB(msdu)->paddr);
+#else
 	dma_unmap_single(ab->dev, ATH11K_SKB_CB(msdu)->paddr, msdu->len,
 			 DMA_TO_DEVICE);
-
+#endif
 	dev_kfree_skb_any(msdu);
 
 	return 0;

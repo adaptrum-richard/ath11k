@@ -5015,8 +5015,11 @@ static int wmi_process_mgmt_tx_comp(struct ath11k *ar, u32 desc_id,
 	spin_unlock_bh(&ar->txmgmt_idr_lock);
 
 	skb_cb = ATH11K_SKB_CB(msdu);
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(skb_cb->paddr);
+#else
 	dma_unmap_single(ar->ab->dev, skb_cb->paddr, msdu->len, DMA_TO_DEVICE);
-
+#endif
 	info = IEEE80211_SKB_CB(msdu);
 	if ((!(info->flags & IEEE80211_TX_CTL_NO_ACK)) && !status)
 		info->flags |= IEEE80211_TX_STAT_ACK;

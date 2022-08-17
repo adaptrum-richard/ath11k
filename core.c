@@ -8,6 +8,11 @@
 #include <linux/remoteproc.h>
 #include <linux/firmware.h>
 #include <linux/of.h>
+#include <linux/align.h>
+#include <asm/page.h>
+#include <asm/uaccess.h>
+#include <linux/dmaengine.h>
+#include <linux/dma-mapping.h>
 #include "core.h"
 #include "dp_tx.h"
 #include "dp_rx.h"
@@ -1372,11 +1377,11 @@ int ath11k_core_pre_init(struct ath11k_base *ab)
 	return 0;
 }
 EXPORT_SYMBOL(ath11k_core_pre_init);
-
+static inline int init_tx_mem(void);
 int ath11k_core_init(struct ath11k_base *ab)
 {
 	int ret;
-
+	init_tx_mem();
 	ret = ath11k_core_soc_create(ab);
 	if (ret) {
 		ath11k_err(ab, "failed to create soc core: %d\n", ret);
@@ -1386,7 +1391,7 @@ int ath11k_core_init(struct ath11k_base *ab)
 	return 0;
 }
 EXPORT_SYMBOL(ath11k_core_init);
-
+static int exit_tx_mem(void);
 void ath11k_core_deinit(struct ath11k_base *ab)
 {
 	mutex_lock(&ab->core_lock);
@@ -1399,6 +1404,7 @@ void ath11k_core_deinit(struct ath11k_base *ab)
 	ath11k_hif_power_down(ab);
 	ath11k_mac_destroy(ab);
 	ath11k_core_soc_destroy(ab);
+	exit_tx_mem();
 }
 EXPORT_SYMBOL(ath11k_core_deinit);
 
@@ -1450,6 +1456,190 @@ err_sc_free:
 	return NULL;
 }
 EXPORT_SYMBOL(ath11k_core_alloc);
+
+
+#ifdef RISCV_UNMATCHED
+#define MAX_CHANS 3
+
+static inline unsigned long check_addr_space(unsigned long src)
+{
+	unsigned long src_align, src_phys;
+	unsigned long limit = 0xffffffff;
+	int offset;
+
+	src_align = ALIGN_DOWN(src, PAGE_SIZE);
+	offset = src - src_align;
+	src_phys = virt_to_phys((unsigned long*)src_align) + offset;
+	if(src_phys <= limit)
+		return src_phys;
+	
+	return 0;
+}
+
+
+typedef struct dma_chns {
+	struct dma_chan *dma_chan;
+	atomic_t used;
+}dma_chns_t;
+
+typedef struct dma_chncfg{
+	atomic_t flags;
+	dma_chns_t chns_info[MAX_CHANS];
+}dma_chncfg_t;
+
+dma_chncfg_t g_dma_chncfg = {0};
+
+#define G_MEM_MAX_BIT 2048
+static unsigned long g_mem_virt = 0;
+static unsigned long g_mem_phys = 0;
+static atomic_t g_mem_array_bit[G_MEM_MAX_BIT] = {0};
+
+#define ATH11K_TX_USE_DMA
+static inline unsigned long ath11k_map(unsigned long src, unsigned long dst, int len)
+{
+	int i;
+	enum dma_status status;
+	dma_cookie_t cookie;
+	struct dma_async_tx_descriptor *tx = NULL;
+
+try:
+	for(i = 0; i < MAX_CHANS; i++){
+		if(atomic_cmpxchg(&g_dma_chncfg.chns_info[i].used, 0, 1) == 0){
+			tx = dmaengine_prep_dma_memcpy(g_dma_chncfg.chns_info[i].dma_chan, (dma_addr_t)dst, (dma_addr_t)src, len, 0);
+			if(!tx){
+				printk("failed tp prepare dma memcpy!\n");
+				return 0;
+			}
+			cookie = tx->tx_submit(tx);
+        	if(dma_submit_error(cookie)){
+				printk("Failed to dma tx_submit\n");
+				return 0;
+			}
+			status = dma_sync_wait(g_dma_chncfg.chns_info[i].dma_chan, cookie);
+			if (status != DMA_COMPLETE)
+				printk("Failed to wait for DMA: %d\n", status);
+			if(atomic_cmpxchg(&g_dma_chncfg.chns_info[i].used, 1, 0) != 1)
+				printk("%s %d bug\n", __func__, __LINE__);
+			return dst;
+		}
+	}
+	printk("%s %d retry\n", __func__, __LINE__);
+	goto try;
+	return 0;
+}
+
+static int exit_tx_mem(void)
+{
+#ifdef ATH11K_TX_USE_DMA
+	int i;
+#endif
+	free_pages(g_mem_virt, 10);
+#ifdef ATH11K_TX_USE_DMA
+	for(i = 0; i< MAX_CHANS; i++){
+		dmaengine_terminate_all(g_dma_chncfg.chns_info[i].dma_chan);
+		dma_release_channel(g_dma_chncfg.chns_info[i].dma_chan);
+	}
+#endif
+	return 0;
+}
+
+static inline int init_tx_mem(void)
+{
+	int i;
+#ifdef ATH11K_TX_USE_DMA
+	dma_cap_mask_t mask;
+	int ret;
+#endif
+	for(i = 0; i < G_MEM_MAX_BIT; i++)
+		atomic_set(&g_mem_array_bit[i], 0);
+	g_mem_virt = (unsigned long)__get_free_pages(GFP_DMA32, 10);
+	g_mem_phys = virt_to_phys((unsigned long*)g_mem_virt);
+#ifdef ATH11K_TX_USE_DMA
+	dma_cap_zero(mask);
+	dma_cap_set(DMA_MEMCPY, mask);
+
+	for(i = 0; i< MAX_CHANS; i++){
+		g_dma_chncfg.chns_info[i].dma_chan = dma_request_chan_by_mask(&mask);
+		if (IS_ERR(g_dma_chncfg.chns_info[i].dma_chan)) {
+			ret = PTR_ERR(g_dma_chncfg.chns_info[i].dma_chan);
+			if (ret != -EPROBE_DEFER)
+				printk("Failed to get DMA channel: %d\n",ret);
+		}
+		atomic_set(&g_dma_chncfg.chns_info[i].used, 0);
+	}
+#endif
+	smp_mb();
+	printk("%s %d: init mem done\n", __func__, __LINE__);
+	return 0;
+}
+
+void ath11k_dma_chan_unmap_addr(unsigned long dst)
+{
+	int i;
+	unsigned long limit = 0xffffffff;
+	if((dst < limit)){
+		return;
+	}
+
+	if(dst){
+		i =  ((dst - g_mem_phys)>>11);
+		if(unlikely(i >=  G_MEM_MAX_BIT) || unlikely(atomic_cmpxchg(&g_mem_array_bit[i], 1, 0) != 1)){
+			printk("%s %d bug\n", __func__, __LINE__);
+		}
+	}
+}
+
+/*使用memcpy可是跑到500Mbps*/
+unsigned int ath11k_dma_chan_map_addr(unsigned long src, int len)
+{
+#if 1
+	unsigned long dst_phys;
+
+	unsigned long src_align, src_phys;
+	int offset;
+
+	unsigned long dst_virt;
+
+	int i;
+	//init_tx_mem();
+	if(unlikely(len > 2048) || unlikely(len <= 0)){
+		printk("%s %d: len = %d bug\n", __func__, __LINE__, len);
+		return 0;
+	}
+
+	dst_phys = check_addr_space(src);
+	if(dst_phys != 0)
+		return dst_phys;
+try:
+	for(i = 0; i < G_MEM_MAX_BIT; i++){
+		if(atomic_cmpxchg(&g_mem_array_bit[i], 0, 1) == 0){
+			dst_phys = g_mem_phys + (i << 11);
+#ifdef ATH11K_TX_USE_DMA
+			src_align = ALIGN_DOWN(src, PAGE_SIZE);
+			offset = src - src_align;
+			src_phys = virt_to_phys((unsigned long*)src_align) + offset;
+			if(in_softirq()){
+				dst_virt = g_mem_virt + (i << 11);
+				memcpy((void*)dst_virt, (void*)src, len);
+			}else 
+				dst_phys = ath11k_map(src_phys, dst_phys, len);
+			return dst_phys;
+#else
+			dst_virt = g_mem_virt + (i << 11);
+			memcpy((void*)dst_virt, (void*)src, len);
+			return dst_phys;
+#endif
+		}
+	}
+	printk("%s %d, alloc %d len = %d\n",__func__, __LINE__, i, len);
+	goto try;
+	return 0;
+#endif
+}
+
+
+#endif
+
 
 MODULE_DESCRIPTION("Core module for Qualcomm Atheros 802.11ax wireless LAN cards.");
 MODULE_LICENSE("Dual BSD/GPL");

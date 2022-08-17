@@ -3439,11 +3439,17 @@ static int ath11k_dp_rx_h_defrag_reo_reinject(struct ath11k *ar, struct dp_rx_ti
 
 	/* change msdu len in hal rx desc */
 	ath11k_dp_rxdesc_set_msdu_len(ab, rx_desc, defrag_skb->len - hal_rx_desc_sz);
-
+#ifdef RISCV_UNMATCHED
+	paddr = ath11k_dma_chan_map_addr((unsigned long)defrag_skb->data, 
+		defrag_skb->len + skb_tailroom(defrag_skb));
+	if(paddr == 0)
+#else
 	paddr = dma_map_single(ab->dev, defrag_skb->data,
 			       defrag_skb->len + skb_tailroom(defrag_skb),
 			       DMA_TO_DEVICE);
+
 	if (dma_mapping_error(ab->dev, paddr))
+#endif
 		return -ENOMEM;
 
 	spin_lock_bh(&rx_refill_ring->idr_lock);
@@ -3507,8 +3513,12 @@ err_free_idr:
 	idr_remove(&rx_refill_ring->bufs_idr, buf_id);
 	spin_unlock_bh(&rx_refill_ring->idr_lock);
 err_unmap_dma:
+#ifdef RISCV_UNMATCHED
+	ath11k_dma_chan_unmap_addr(paddr);
+#else
 	dma_unmap_single(ab->dev, paddr, defrag_skb->len + skb_tailroom(defrag_skb),
 			 DMA_TO_DEVICE);
+#endif
 	return ret;
 }
 
